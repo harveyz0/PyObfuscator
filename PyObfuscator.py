@@ -75,48 +75,29 @@ __all__ = [
     "DocLevels",
 ]
 
-print(copyright)
+#print(copyright)
 
-from ast import (
-    AST,
-    Attribute,
-    Call,
-    Tuple as TupleAst,
-    Load,
-    Constant,
-    Import,
-    ImportFrom,
-    AugAssign,
-    AnnAssign,
-    Assign,
-    Module,
-    Store,
-    Name as NameAst,
-    NodeTransformer,
-    JoinedStr,
-    Expr,
-    ClassDef,
-    FunctionDef,
-    AsyncFunctionDef,
-    ExceptHandler,
-    Global,
-    alias,
-    arg,
-    parse,
-    unparse,
-)
+import builtins
 from argparse import ArgumentParser, Namespace
-from logging import debug, info, basicConfig
-from random import choice, choices, randint
-from string import ascii_letters, digits
-from typing import Tuple, Dict, List
-from dataclasses import dataclass
-from os.path import splitext
+from ast import (AST, AnnAssign, Assign, AsyncFunctionDef, Attribute,
+                 AugAssign, Call, ClassDef, Constant, ExceptHandler, Expr,
+                 FunctionDef, Global, Import, ImportFrom, JoinedStr, Load,
+                 Module)
+from ast import Name as NameAst
+from ast import NodeTransformer, Store
+from ast import Tuple as TupleAst
+from ast import alias, arg, parse, unparse
 from base64 import b85encode
-from re import sub, finditer
+from dataclasses import dataclass
 from gzip import compress
 from json import dump
-import builtins
+from logging import basicConfig, debug, info, DEBUG, ERROR
+from os.path import splitext
+from random import choice, choices, randint
+from re import finditer, sub
+from collections import UserDict
+from string import ascii_letters, digits
+from typing import Dict, List, Tuple
 
 
 class DocPassword:
@@ -214,6 +195,16 @@ class ElementImport:
     asname: str
 
 
+class DefaultDict(UserDict):
+    def __getitem__(self, key):
+        if key not in self.data:
+            self.data[key] = Name(key, key)
+        return self.data[key]
+
+    def __setitem__(self, key, value):
+        return super().__setitem__(key, value)
+
+
 class Obfuscator(NodeTransformer):
 
     """
@@ -232,29 +223,39 @@ class Obfuscator(NodeTransformer):
     """
 
     def __init__(
-        self,
-        filename: str,
-        output_filename: str = None,
-        level: int = 6,
-        names: Dict[str, Name] = {},
-        deobfuscate: bool = True,
-        password: str = None,
-        encoding: str = "utf-8",
-        names_size: int = 12,
+            self,
+            filename: str,
+            output_filename: str = None,
+            level: int = 6,
+            names: DefaultDict[str, Name] = DefaultDict({}),
+            deobfuscate: bool = True,
+            password: str = None,
+            encoding: str = "utf-8",
+            names_size: int = 12,
+            skip_builtins: bool = False,
+            skip_constants: bool = False,
+            skip_names: bool = False,
+            skip_ints: bool = False,
+            skip_bytes: bool = False,
+            skip_strings: bool = False,
+            skip_encrypt: bool = False,
     ):
+        self.init_skips(skip_builtins, skip_constants, skip_names, skip_ints, skip_bytes, skip_strings, skip_encrypt)
+        self.level = level
+        #self.config_from_level()
         self.filename = filename
         self.output_filename = (
-            output_filename or f"{splitext(filename)[0]}_obfu.py"
-        )
-        self.level = level
+                output_filename or f"{splitext(filename)[0]}_obfu.py"
+            )
         self.deobfuscate = deobfuscate
+        self.print_code = False
 
         self.password = password
         self.code = None
         self.astcode = None
 
         self.default_names = names
-        self.obfu_names = {v.obfuscation: v for v in names.values()}
+        self.obfu_names = DefaultDict({v.obfuscation: v for v in names.values()})
 
         self.names_size = names_size
         self.encoding = encoding
@@ -273,6 +274,57 @@ class Obfuscator(NodeTransformer):
         self.in_assign = False
 
         super().__init__()
+
+    def config_from_level(self):
+        if self.level >= 1:
+            self.skip_module_obfu = False
+            self.skip_imports = False
+            self.skip_classes = False
+            self.skip_functions = False
+            self.skip_globals = False
+            self.skip_args = False
+        if self.level >= 5:
+            self.skip_base85 = False
+        if self.level >= 4:
+            self.skip_xor_encryption = False
+        if self.level >= 3:
+            self.skip_gzip = False
+        if self.level < 2:
+            self.skip_encrypt = True
+        if self.level < 3:
+            self.skip_builtins = True
+        if self.level < 1:
+            self.skip_names = True
+        if self.level < 2:
+            self.skip_constants = True
+        if self.level >= 6:
+            self.skip_hex_encode = False
+
+    def init_skips(self,
+                   skip_builtins: bool = True,
+                   skip_constants: bool = True,
+                   skip_names: bool = True,
+                   skip_ints: bool = True,
+                   skip_bytes: bool = True,
+                   skip_strings: bool = True,
+                   skip_encrypt: bool = True):
+        self.skip_builtins = skip_builtins
+        self.skip_constants = skip_constants
+        self.skip_names = skip_names
+        self.skip_ints = skip_ints
+        self.skip_bytes = skip_bytes
+        self.skip_strings = skip_strings
+        self.skip_encrypt = skip_encrypt
+        self.skip_gzip = True
+        self.skip_hex_encode = True
+        self.skip_xor_encryption = True
+        self.skip_base85 = True
+        self.skip_module_obfu = True
+        self.skip_imports = True
+        self.skip_classes = True
+        self.skip_functions = True
+        self.skip_globals = True
+        self.skip_args = True
 
     def get_random_name(
         self, first_name: str, is_attribute: bool = False
@@ -353,8 +405,8 @@ class Obfuscator(NodeTransformer):
 
         This function raises RuntimeError if self.code is None.
         """
-
-        if (init := getattr(self, "default_variables", None)) is None:
+        init = getattr(self, "default_variables", None)
+        if init is None:
             raise RuntimeError(
                 "Initialize obfuscation with 'init_builtins' method."
             )
@@ -404,7 +456,7 @@ class Obfuscator(NodeTransformer):
 
         code = code or self.code
 
-        if self.level >= 3:
+        if not self.skip_gzip:
             code = compress(code.encode())
             self.code = (
                 code
@@ -433,7 +485,7 @@ class Obfuscator(NodeTransformer):
 
         code = code or self.code
 
-        if self.level >= 6:
+        if not self.skip_hex_encode:
             code = "".join([f"\\x{car:0>2x}" for car in code.encode()])
             code = self.code = f"_=exec;_('{code}')"
             debug("Code is encoded as hexadecimal.")
@@ -459,7 +511,7 @@ class Obfuscator(NodeTransformer):
         """
 
         code = code or self.code
-        if self.level < 4:
+        if self.skip_xor_encryption:
             return code
 
         password = password or self.password
@@ -511,7 +563,7 @@ class Obfuscator(NodeTransformer):
 
         code = code or self.code
 
-        if self.level < 5:
+        if self.skip_base85:
             return code
 
         code = b85encode(code.encode())
@@ -553,6 +605,10 @@ class Obfuscator(NodeTransformer):
         """
         This function obfuscates default variables and builtins names.
         """
+
+        if self.skip_builtins:
+            self.default_variables = ""
+            return self.default_variables
 
         names = tuple(map(self.get_random_name, dir(builtins) + default_dir))
 
@@ -608,7 +664,7 @@ class Obfuscator(NodeTransformer):
             list(range(256)), k=self._xor_password_key_length
         )
 
-        if self.level < 2:
+        if self.skip_strings:
             return code, self.astcode
 
         self.code = code = (
@@ -746,6 +802,9 @@ class Obfuscator(NodeTransformer):
         This function obfuscate a string.
         """
 
+        if self.skip_strings:
+            return self.code
+
         def to_hex(car: str) -> str:
             return f"'\\x{ord(car):0>2x}'"
 
@@ -796,6 +855,8 @@ class Obfuscator(NodeTransformer):
         This method obfuscates int calls for int obfuscation.
         """
 
+        if self.skip_ints:
+            return self.code
         code = self.code
         for match in finditer(r"\('0o[0-7]+', 8\)", code):
             string = match.group()
@@ -850,6 +911,8 @@ class Obfuscator(NodeTransformer):
         code = self.base85(code)
         self.code = self.hexadecimal(code)
         code = self.write_code()
+        if self.print_code:
+            print(code)
         self.write_deobfuscate()
 
     def get_attributes_from(self, new_ast: AST, old_ast: AST) -> AST:
@@ -900,13 +963,13 @@ class Obfuscator(NodeTransformer):
         - returns the obfuscate ast code
         """
 
-        if self.level < 2:
+        if self.skip_constants:
             info("Level is less than 2 no Constant obfuscation.")
             return self.generic_visit(astcode)
 
         is_str = isinstance(astcode.value, str)
 
-        if is_str and not self.in_format_string:
+        if is_str and not self.in_format_string and not self.skip_strings:
             debug(f"String obfuscation for {astcode.value!r}.")
             astcode.value = astcode.value.encode(self.encoding)
             astcode = self.generic_visit(astcode)
@@ -937,7 +1000,7 @@ class Obfuscator(NodeTransformer):
                 keywords=[],
             )
 
-        elif isinstance(astcode.value, bytes):
+        elif isinstance(astcode.value, bytes) and not self.skip_bytes:
             debug(f"Bytes obfuscation for {astcode.value!r}.")
             astcode = self.generic_visit(astcode)
             return Call(
@@ -948,7 +1011,7 @@ class Obfuscator(NodeTransformer):
                 keywords=[],
             )
 
-        elif isinstance(astcode.value, int) and not self.in_format_string:
+        elif isinstance(astcode.value, int) and not self.in_format_string and not self.skip_ints:
             debug(f"Integer obfuscation for {astcode.value!r}")
             astcode = self.generic_visit(astcode)
             return Call(
@@ -980,7 +1043,7 @@ class Obfuscator(NodeTransformer):
         returns module.
         """
 
-        if self.level >= 1:
+        if self.skip_module_obfu:
             debug("Delete Module doc string.")
             astcode = self.delete_doc_string(astcode)
         else:
@@ -994,7 +1057,7 @@ class Obfuscator(NodeTransformer):
         This function build a obfuscate 'from ... import ...'
         """
 
-        if self.level < 1:
+        if self.skip_imports:
             info("Level is less than 1 no ImportFrom obfuscation.")
             astcode = self.generic_visit(astcode)
             return astcode
@@ -1032,7 +1095,7 @@ class Obfuscator(NodeTransformer):
         This function obfuscates 'import ...'
         """
 
-        if self.level < 1:
+        if self.skip_imports:
             info("Level is less than 1 no ImportFrom obfuscation.")
             astcode = self.generic_visit(astcode)
             return astcode
@@ -1088,7 +1151,7 @@ class Obfuscator(NodeTransformer):
 
         precedent_class = self.set_namespace_name(astcode.name)
 
-        if self.level >= 1:
+        if not self.skip_classes:
             debug(f"{astcode.name!r} (class definition) obfuscation.")
             astcode.name = self.get_random_name(
                 astcode.name, bool(precedent_class)
@@ -1122,7 +1185,7 @@ class Obfuscator(NodeTransformer):
 
         precedent_class = self.set_namespace_name(astcode.name)
 
-        if self.level >= 1:
+        if not self.skip_functions:
             name = astcode.name
             if not (name.startswith("__") and name.endswith("__")):
                 astcode.name = self.get_random_name(
@@ -1143,7 +1206,7 @@ class Obfuscator(NodeTransformer):
         returns a Name with different id
         """
 
-        if self.level >= 1:
+        if not self.skip_names:
             debug(f"Name obfuscation for {astcode.id!r}")
             astcode.id = self.get_random_name(astcode.id).obfuscation
 
@@ -1158,7 +1221,7 @@ class Obfuscator(NodeTransformer):
         returns a Global with different names
         """
 
-        if self.level >= 1:
+        if not self.skip_globals:
             for i, name in enumerate(astcode.names):
                 astcode.names[i] = self.get_random_name(name).obfuscation
                 debug(f"[Global] {name!r} obfuscation")
@@ -1174,7 +1237,7 @@ class Obfuscator(NodeTransformer):
         returns a AST arg with different arg name
         """
 
-        if self.level >= 1:
+        if not self.skip_args:
             debug(f"arg obfuscation for {astcode.arg}")
             self.delete_field(astcode, "annotation")
             astcode.arg = self.get_random_name(astcode.arg).obfuscation
@@ -1457,7 +1520,14 @@ def parse_args() -> Namespace:
         action="store_true",
         help="Print the obfuscate code in console.",
     )
-    add_argument("--log-level", "-g", type=int, default=40, help="Log level.")
+    add_argument("--do-strings", default=False, action='store_true', help="This will not encode strings into encrypted bytes")
+    add_argument("--do-builtins", default=False, action='store_true', help="This will not give builtins random names")
+    add_argument("--do-constants", default=False, action='store_true', help="This will skip over encoding constants such as integers and bytes and strings")
+    add_argument("--do-names", default=False, action='store_true', help="This will not obfuscate function names and variable names")
+    add_argument("--do-ints", default=False, action='store_true', help="This will not obfuscate integers")
+    add_argument("--do-bytes", default=False, action='store_true', help="This will not obfuscate bytes")
+    add_argument("--do-encrypt", default=False, action='store_true', help="Will skip over any encryption including string encryption")
+    add_argument("--log-level", "-g", type=int, default=ERROR, help="Log level.")
     add_argument("--log-filename", "-f", default=None, help="Log filename.")
 
     return parser.parse_args()
@@ -1470,7 +1540,7 @@ def main() -> int:
 
     args = parse_args()
 
-    names = {}
+    names = DefaultDict({})
 
     if args.names is not None:
         for name in args.names:
@@ -1492,6 +1562,13 @@ def main() -> int:
         args.password,
         args.file_encoding,
         args.names_size,
+        not args.do_builtins,
+        not args.do_constants,
+        not args.do_names,
+        not args.do_ints,
+        not args.do_bytes,
+        not args.do_strings,
+        not args.do_encrypt,
     )
     obfu.default_obfuscation()
 
