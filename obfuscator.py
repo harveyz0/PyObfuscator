@@ -53,7 +53,7 @@ class Identifier:
     namespace_name: str = None
 
 
-class NameMap(UserDict):
+class NameMap:
     def __init__(self):
         self.name_to_obfu = {}
         self.obfu_to_name = {}
@@ -113,8 +113,12 @@ class NameMap(UserDict):
 
         return name
 
-    def add_name(self, name: str, is_attribute: bool = False) -> Identifier:
-        new_name = self.get_random_name(name, is_attribute)
+    def add_name(self, name: str, is_attribute: bool = False, obfuscate=True) -> Identifier:
+        new_name = None
+        if obfuscate:
+            new_name = self.get_random_name(name, is_attribute)
+        else:
+            new_name = Identifier(name, name, is_attribute)
         self.add(new_name)
         return new_name
 
@@ -122,30 +126,43 @@ class NameMap(UserDict):
         self.obfu_to_name[name.obfuscation] = name
         self.name_to_obfu[name.name] = name
 
-    def add_names(self, names: Iterable[str] | str):
+    def add_names(self, names: Iterable[str] | str, obfuscate=True):
         if isinstance(names, str):
             names = (names,)
         for n in names:
-            self.add_name(n)
+            self.add_name(n, obfuscate=obfuscate)
+
+    def add_builtins(self, obfuscate=False):
+        """
+        This will add all the builtins to the names list. If you plan to not
+        obfuscate builtins then you have to run this. Otherwise you'll end up
+        with obfuscated builtin names
+        """
+        self.add_names(set(dir() + dir(builtins)), obfuscate=obfuscate)
 
     @staticmethod
     def obfuscate_names(names: List[str]) -> Dict[str, Identifier]:
         pass
 
-    @staticmethod
-    def add_builtins(names):
-        names.add_names(set(dir() + dir(builtins)))
-
 
 class Obfuscator(NodeTransformer):
-    def __init__(self, source: str, encoding: str = "utf-8", names_size: int = 12):
+    def __init__(self,
+                 source: str,
+                 encoding: str = "utf-8",
+                 names_size: int = 12,
+                 obfuscate_builtins=False):
         self.encoding = encoding
-        self.names_size = names_size
         self.source = source
         self.in_format_string = False
         self._xor_password_key_length = 0
         self._xor_password_key = None
         self.skip_strings = False
+        self.skip_names = False
+        self.default_names = NameMap()
+        self.default_names.add_builtins(obfuscate=obfuscate_builtins)
+
+    def get_random_name(self, first_name: str, is_attribute: bool = False) -> Identifier:
+        return self.default_names.get_random_name(first_name, is_attribute)
 
     def parse(self) -> AST:
         return parse(self.source)
@@ -175,6 +192,21 @@ class Obfuscator(NodeTransformer):
         astcode = self.generic_visit(astcode)
         self.in_format_string = False
         debug("Joined str end.")
+
+    def visit_Name(self, astcode: Name) -> Name:
+        """
+        This function obfuscates name.
+
+        astcode(Name): the name to obfuscate
+        returns a Name with different id
+        """
+
+        if not self.skip_names:
+            debug(f"Name obfuscation for {astcode.id!r}")
+            astcode.id = self.get_random_name(astcode.id).obfuscation
+
+        astcode = self.generic_visit(astcode)
+        return astcode
 
     def encode_string(self, astcode: Constant):
         encoded = b85encode(astcode.value.encode())
