@@ -21,7 +21,7 @@ from ast import (
     Load,
     Module,
 )
-from ast import Name as NameAst
+from ast import Name
 from ast import NodeTransformer, Store
 from ast import Tuple as TupleAst
 from ast import alias, arg, parse, unparse
@@ -36,7 +36,7 @@ from typing import Dict, Iterable, List, Tuple
 
 
 @dataclass
-class Name:
+class Identifier:
     """
     Dataclass with default name, obfuscation name, definition and namespace.
 
@@ -69,7 +69,7 @@ class NameMap(UserDict):
     def get_obfu(self, key, default=None):
         return self.obfu_to_name.get(key, default)
 
-    # def get_reversed_names(self) -> Dict[str, Name]:
+    # def get_reversed_names(self) -> Dict[str, Identifier]:
     #    rev = {}
     #    for name, data in self.values():
     #        if data
@@ -90,7 +90,7 @@ class NameMap(UserDict):
             name = first + name
         return name
 
-    def get_random_name(self, first_name: str, is_attribute: bool = False) -> Name:
+    def get_random_name(self, first_name: str, is_attribute: bool = False) -> Identifier:
         """
         This function returns a random variable name.
 
@@ -104,7 +104,7 @@ class NameMap(UserDict):
                 name.is_attribute = True
             return name
 
-        name = Name(
+        name = Identifier(
             first_name,
             self.generate_random_label(),
             is_attribute,
@@ -113,12 +113,12 @@ class NameMap(UserDict):
 
         return name
 
-    def add_name(self, name: str, is_attribute: bool = False) -> Name:
+    def add_name(self, name: str, is_attribute: bool = False) -> Identifier:
         new_name = self.get_random_name(name, is_attribute)
         self.add(new_name)
         return new_name
 
-    def add(self, name: Name):
+    def add(self, name: Identifier):
         self.obfu_to_name[name.obfuscation] = name
         self.name_to_obfu[name.name] = name
 
@@ -129,7 +129,7 @@ class NameMap(UserDict):
             self.add_name(n)
 
     @staticmethod
-    def obfuscate_names(names: List[str]) -> Dict[str, Name]:
+    def obfuscate_names(names: List[str]) -> Dict[str, Identifier]:
         pass
 
     @staticmethod
@@ -145,9 +145,14 @@ class Obfuscator(NodeTransformer):
         self.in_format_string = False
         self._xor_password_key_length = 0
         self._xor_password_key = None
+        self.skip_strings = False
 
     def parse(self) -> AST:
         return parse(self.source)
+
+    def init_string_obfuscation(self) -> str:
+        self.source = "from base64 import b85decode\n" + self.source
+        return self.source
 
     def visit_ExceptHandler(self, astcode: ExceptHandler) -> ExceptHandler:
         """
@@ -173,7 +178,7 @@ class Obfuscator(NodeTransformer):
 
     def encode_string(self, astcode: Constant):
         encoded = b85encode(astcode.value.encode())
-        return parse(f"base64.b85decode({encoded})")
+        return Call(func=Attribute(value=Call(func=Name(id='b85decode', ctx=Load()), args=[Constant(value=encoded)]), attr='decode', ctx=Load()))
 
     def encrypt_obfuscate_string(self, astcode: Constant):
         debug(f"String obfuscation for {astcode.value!r}.")
@@ -181,10 +186,10 @@ class Obfuscator(NodeTransformer):
         astcode = self.generic_visit(astcode)
         return Call(
             func=Call(
-                func=NameAst(id="getattr", ctx=Load()),
+                func=Name(id="getattr", ctx=Load()),
                 args=[
                     Call(
-                        func=NameAst(id="xor", ctx=Load()),
+                        func=Name(id="xor", ctx=Load()),
                         args=[Constant(value=self.xor(astcode.value), kind=None)],
                         keywords=[],
                     ),
@@ -196,6 +201,15 @@ class Obfuscator(NodeTransformer):
             keywords=[],
         )
 
+    def visit_String(self, astcode: Constant):
+        if self.skip_strings:
+            return self.generic_visit(astcode)
+        if not self.in_format_string:
+            return self.encode_string(astcode)
+        else:
+            self.hard_coded_string.add((astcode.value, True))
+        return self.generic_visit(astcode)
+
     def visit_Constant(self, astcode: Constant) -> Call:
         """
         This function encrypts python constants data.
@@ -206,44 +220,20 @@ class Obfuscator(NodeTransformer):
         """
 
         is_str = isinstance(astcode.value, str)
+        if is_str:
+            return self.visit_String(astcode)
 
-        if is_str and not self.in_format_string:
-            return self.encode_string(astcode)
-
-        """
-        elif isinstance(astcode.value, bytes) and not self.skip_bytes:
+        if isinstance(astcode.value, bytes) and not self.skip_bytes:
             debug(f"Bytes obfuscation for {astcode.value!r}.")
-            astcode = self.generic_visit(astcode)
-            return Call(
-                func=NameAst(
-                    id=self.default_names["xor"].obfuscation, ctx=Load()
-                ),
-                args=[Constant(value=self.xor(astcode.value))],
-                keywords=[],
-            )
-
-        elif isinstance(astcode.value, int) and not self.in_format_string and not self.skip_ints:
+            #astcode = self.generic_visit(astcode)
+        elif isinstance(astcode.value, int) and not self.in_format_string:
             debug(f"Integer obfuscation for {astcode.value!r}")
-            astcode = self.generic_visit(astcode)
-            return Call(
-                func=NameAst(
-                    id=self.default_names["int"].obfuscation, ctx=Load()
-                ),
-                args=[
-                    Constant(value=oct(astcode.value)),
-                    Constant(value=8),
-                ],
-                keywords=[],
-            )
-        elif is_str:
-            self.hard_coded_string.add((astcode.value, True))
+            #astcode = self.generic_visit(astcode)
         else:
             info(
                 f"In format string {astcode.value!r} this "
                 "constant type can't be obfuscated."
             )
-            astcode = self.generic_visit(astcode)
-        """
 
         return self.generic_visit(astcode)
 
@@ -333,6 +323,7 @@ class Obfuscator(NodeTransformer):
 
 def main(*args):
     obfu = Obfuscator(Obfuscator.load_file("../simples/factorial_iter.py"))
+    obfu.init_string_obfuscation()
     print(obfu.default_obfuscation())
 
 
