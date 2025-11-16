@@ -21,6 +21,7 @@ from ast import (
     Load,
     Module,
 )
+from sys import argv
 from ast import Name
 from ast import NodeTransformer, Store
 from ast import Tuple as TupleAst
@@ -62,6 +63,12 @@ class NameMap:
 
     def __getitem__(self, key):
         return self.name_to_obfu.__getitem__(key)
+
+    def __contains__(self, name: str) -> bool:
+        return name in self.name_to_obfu
+
+    def obfu_contains(self, obfu: str) -> bool:
+        return obfu in self.obfu_to_name
 
     def get_name(self, key, default=None):
         return self.name_to_obfu.get(key, default)
@@ -113,6 +120,11 @@ class NameMap:
 
         return name
 
+    def get_or_add_name(self, name: str, is_attribute: bool = False, obfuscate=True) -> Identifier:
+        if name in self:
+            return self.name_to_obfu[name]
+        return self.add_name(name, is_attribute, obfuscate)
+
     def add_name(self, name: str, is_attribute: bool = False, obfuscate=True) -> Identifier:
         new_name = None
         if obfuscate:
@@ -162,7 +174,7 @@ class Obfuscator(NodeTransformer):
         self.default_names.add_builtins(obfuscate=obfuscate_builtins)
 
     def get_random_name(self, first_name: str, is_attribute: bool = False) -> Identifier:
-        return self.default_names.get_random_name(first_name, is_attribute)
+        return self.default_names.get_or_add_name(first_name, is_attribute)
 
     def parse(self) -> AST:
         return parse(self.source)
@@ -233,6 +245,20 @@ class Obfuscator(NodeTransformer):
             keywords=[],
         )
 
+    @staticmethod
+    def delete_doc_string(astcode: AST) -> AST:
+        """
+        This function deletes doc string in AST object.
+        """
+
+        for i, element in enumerate(astcode.body):
+            if isinstance(element, Expr) and isinstance(
+                element.value, Constant
+            ):
+                del astcode.body[i]
+
+        return astcode
+
     def visit_String(self, astcode: Constant):
         if self.skip_strings:
             return self.generic_visit(astcode)
@@ -241,6 +267,28 @@ class Obfuscator(NodeTransformer):
         else:
             self.hard_coded_string.add((astcode.value, True))
         return self.generic_visit(astcode)
+
+    def visit_FunctionDef(self, astcode: FunctionDef) -> FunctionDef:
+        """
+        This function obfuscates function name if isn't a magic method.
+
+        astcode(FunctionDef): function to obfuscate
+        returns a FunctionDef with different name
+        """
+
+        precedent_class = self.default_names.set_namespace_name(astcode.name)
+
+        name = astcode.name
+        if not (name.startswith("__") and name.endswith("__")):
+            astcode.name = self.get_random_name(
+                name, bool(precedent_class)
+            ).obfuscation
+        debug(f"{name!r} function obfuscation.")
+        astcode = self.delete_doc_string(astcode)
+
+        astcode = self.generic_visit(astcode)
+        self.current_class = precedent_class
+        return astcode
 
     def visit_Constant(self, astcode: Constant) -> Call:
         """
@@ -354,10 +402,10 @@ class Obfuscator(NodeTransformer):
 
 
 def main(*args):
-    obfu = Obfuscator(Obfuscator.load_file("../simples/factorial_iter.py"))
+    obfu = Obfuscator(Obfuscator.load_file(args[0]))
     obfu.init_string_obfuscation()
     print(obfu.default_obfuscation())
 
 
 if __name__ == "__main__":
-    main()
+    main(argv[1])
