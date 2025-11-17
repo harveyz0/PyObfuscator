@@ -29,7 +29,7 @@ from ast import alias, arg, parse, unparse
 from base64 import b85encode, b85decode
 from collections import UserDict
 from dataclasses import dataclass
-from logging import DEBUG, ERROR, debug, info
+from logging import DEBUG, ERROR, debug, info, basicConfig
 from random import choice, choices, randint
 from re import finditer, sub
 from string import ascii_letters, digits
@@ -213,9 +213,8 @@ class Obfuscator(NodeTransformer):
         returns a Name with different id
         """
 
-        if not self.skip_names:
-            debug(f"Name obfuscation for {astcode.id!r}")
-            astcode.id = self.get_random_name(astcode.id).obfuscation
+        debug(f"Name obfuscation for {astcode.id!r}")
+        astcode.id = self.get_random_name(astcode.id).obfuscation
 
         astcode = self.generic_visit(astcode)
         return astcode
@@ -288,6 +287,34 @@ class Obfuscator(NodeTransformer):
 
         astcode = self.generic_visit(astcode)
         self.current_class = precedent_class
+        return astcode
+
+    def delete_field(self, element: AST, field: str) -> AST:
+        """
+        This function deletes field in AST object.
+        """
+
+        dict_ = element.__dict__
+        if field in dict_.keys():
+            del dict_[field]
+            element._fields = tuple(dict_.keys())
+            info(f"Deleted {field} in {type(element)}")
+
+        return element
+
+    def visit_arg(self, astcode: arg) -> arg:
+        """
+        This function obfuscates AST arg
+
+        astcode(arg): the arg to obfuscate
+        returns a AST arg with different arg name
+        """
+
+        debug(f"arg obfuscation for {astcode.arg}")
+        self.delete_field(astcode, "annotation")
+        astcode.arg = self.get_random_name(astcode.arg).obfuscation
+
+        astcode = self.generic_visit(astcode)
         return astcode
 
     def visit_Constant(self, astcode: Constant) -> Call:
@@ -402,6 +429,11 @@ class Obfuscator(NodeTransformer):
 
 
 def main(*args):
+    basicConfig(
+        filename=None,
+        level=ERROR,
+        #format="%(levelname)s - %(message)s",
+    )
     obfu = Obfuscator(Obfuscator.load_file(args[0]))
     obfu.init_string_obfuscation()
     print(obfu.default_obfuscation())
